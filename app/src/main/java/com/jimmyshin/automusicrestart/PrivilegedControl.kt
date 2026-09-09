@@ -7,6 +7,9 @@ import java.util.concurrent.TimeUnit
 
 /** Fixed target-only operations. No caller-supplied shell or package names. */
 class PrivilegedControl : IControl.Stub() {
+    private val hidden = HiddenPlayback { command(*it) }
+    private var initializeNext = false
+    private var before: HiddenPlayback.Content? = null
     private fun command(vararg args: String, allowEmpty: Boolean = false): String {
         val process = ProcessBuilder(*args).redirectErrorStream(true).start()
         if (!process.waitFor(8, TimeUnit.SECONDS)) {
@@ -19,8 +22,18 @@ class PrivilegedControl : IControl.Stub() {
         return result.trim()
     }
     override fun inspect(): String = command("/system/bin/pidof", Target.PACKAGE, allowEmpty = true)
-    override fun stopTarget(): String = command("/system/bin/am", "force-stop", "--user", "0", Target.PACKAGE)
+    override fun stopTarget(): String {
+        before = hidden.capture()
+        val result = command("/system/bin/am", "force-stop", "--user", "0", Target.PACKAGE)
+        initializeNext = true
+        return result
+    }
     override fun preparePlayback(): String {
+        if (!initializeNext) return startService()
+        initializeNext = false // Exactly one initialization attempt per stop; no retry loop.
+        return hidden.initialize(before, ::startService)
+    }
+    private fun startService(): String {
         // UserService runs as shell. Use its real package identity and a null app thread,
         // rather than a normal app Context which is invalid in a Shizuku UserService.
         val manager = Class.forName("android.app.ActivityManager").getMethod("getService").invoke(null)
