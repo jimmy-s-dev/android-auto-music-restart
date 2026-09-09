@@ -20,7 +20,7 @@ class DeviceChecks : Instrumentation() {
         val result = Bundle()
         try {
             runOnMainSync {
-                if (scenario == "automationOff" || scenario == "automaticService") Store.enabled = false
+                if (scenario == "automationOff" || scenario == "automaticService" || scenario == "prepareWidget") Store.enabled = false
                 android.service.notification.NotificationListenerService.requestRebind(
                     android.content.ComponentName(targetContext, AutoListener::class.java))
             }
@@ -32,6 +32,38 @@ class DeviceChecks : Instrumentation() {
             result.putString("screenOn", targetContext.getSystemService(android.os.PowerManager::class.java).isInteractive.toString())
             when (scenario) {
                 "probe" -> Unit
+                "prepareWidget" -> {
+                    check(Bridge.ready() && AutoListener.instance != null)
+                    val bridge = Bridge()
+                    try { bridge.connect().stopTarget() } finally { bridge.close(destroy = true) }
+                    runOnMainSync { Store.enabled = true; AutoListener.instance?.refresh(true) }
+                    result.putInt("automaticAttempts", Store.prefs.getInt("automaticAttempts", 0))
+                    result.putInt("automaticStarts", Store.prefs.getInt("automaticStarts", 0))
+                }
+                "cancelExitWait" -> {
+                    check(Bridge.ready() && AutoListener.instance != null)
+                    fun count(marker: String) = Store.prefs.getString("log", "").orEmpty()
+                        .lineSequence().count { marker in it }
+                    val initialReturns = count("시간 측정: 종료 반환")
+                    val initialInitializations = count("시간 측정: 초기화 시작")
+                    val displays = targetContext.getSystemService(android.hardware.display.DisplayManager::class.java)
+                    try {
+                        runOnMainSync { Runner.start(true, 0) }
+                        val by = SystemClock.elapsedRealtime() + 30000
+                        while (count("시간 측정: 종료 반환") == initialReturns && Runner.running &&
+                            SystemClock.elapsedRealtime() < by) Thread.sleep(10)
+                        check(count("시간 측정: 종료 반환") > initialReturns) { "Stop return was not observed" }
+                        runOnMainSync { Runner.cancel("종료 확인 대기 중 취소 시험") }
+                        val finishBy = SystemClock.elapsedRealtime() + 10000
+                        while (Runner.running && SystemClock.elapsedRealtime() < finishBy) Thread.sleep(50)
+                        check(!Runner.running && Store.prefs.getString("lastResult", "") == "cancelled")
+                        check(count("시간 측정: 초기화 시작") == initialInitializations) { "Initialization after cancellation" }
+                        check(displays.displays.none { it.name == HiddenPlayback.DISPLAY_NAME }) { "Display leaked" }
+                        check(PlaybackMonitor.controllers().none {
+                            it.playbackState?.state == android.media.session.PlaybackState.STATE_PLAYING
+                        }) { "Playback resumed after cancellation" }
+                    } finally { if (Runner.running) Runner.cancel("종료 확인 취소 시험 정리") }
+                }
                 "pausePlayback" -> {
                     runOnMainSync {
                         Store.enabled = false
@@ -66,6 +98,7 @@ class DeviceChecks : Instrumentation() {
                 "history" -> Bridge().use { bridge ->
                     result.putString("processHistory", bridge.connect().inspectHistory())
                     result.putInt("automaticAttempts", Store.prefs.getInt("automaticAttempts", 0))
+                    result.putInt("automaticStarts", Store.prefs.getInt("automaticStarts", 0))
                     result.putString("monitorStatus", Store.prefs.getString("monitorStatus", ""))
                 }
                 "historyRepeat" -> {

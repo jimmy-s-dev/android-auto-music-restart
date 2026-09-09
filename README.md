@@ -32,11 +32,12 @@ Shizuku에서 시스템 프로세스 진단의 `historicalHostingComponentTypes`
 
 자동 실행은 별도 예약 대기 없이 다음 기존 순서를 사용합니다.
 
-**재생 요청 → 5초 대기 → 강제 종료 → 2초 대기 → 가상 화면 초기화 → 재생 확인**
+**재생 요청 → 5초 대기 → 강제 종료 → 종료 확인 대기 → 가상 화면 초기화 → 재생 확인**
 
 - 대상은 `app.morphe.android.apps.youtube.music`으로 고정됩니다. 다른 앱에 재생 키를 보내지 않습니다.
 - 종료 직전에 프로세스 식별값·Activity 이력·세션·곡·재생 상태를 재확인합니다. 사용자가 음악 화면을 열거나 곡을 바꾸거나 일시정지하면 불필요한 종료를 취소합니다. 버퍼링 복구는 자연 복구돼도 취소합니다.
 - Shizuku의 `am force-stop --user 0`으로 대상만 종료하고, 이전 PID·세션이 사라졌는지 확인합니다.
+- 종료 명령 반환 후 500ms부터 대상 프로세스와 세션을 확인합니다. 250ms 간격으로 두 번 연속 모두 없으면 조기에 초기화를 시작합니다. 그 외에는 반환 후 2초 시점에 기존 종료 검사를 적용합니다. 조회 소요 시간도 경과 시간에 포함하며, 진행 중 조회 때문에 실제 확인 완료는 2초를 넘을 수 있습니다. 조회 오류는 종료 성공으로 처리하지 않습니다.
 - 실제 디스플레이에 연결되지 않은 임시 가상 화면에서 MusicActivity를 약 6초 초기화합니다. 프레임은 내부 버퍼에서 소비하고 저장·송출하지 않습니다. 기본 화면으로 우회하지 않습니다.
 - 새 재생 세션을 확인하고 가상 화면을 제거합니다. 비교할 정보가 있으면 현재 곡이 같은지 검사합니다. 다음 곡 목록 재구성은 허용하며, 재생 위치는 처음으로 돌아갈 수 있습니다.
 - 자동화 끄기·사용자 취소·이어폰 분리 신호·권한 상실 때 중단합니다. 강제 종료 뒤 중단되면 음악이 정지한 채 남을 수 있습니다. Android Auto 연결 여부 자체는 실행·중단 조건이 아닙니다.
@@ -68,6 +69,6 @@ adb -s DEVICE shell am instrument -w -e scenario history com.jimmyshin.automusic
 adb -s DEVICE shell am instrument -w -e scenario automaticService com.jimmyshin.automusicrestart.test/com.jimmyshin.automusicrestart.DeviceChecks
 ```
 
-`history`는 이력을 조회합니다. `automaticService`는 대상 종료·서비스 재생·자동 복구를 실제 시험하고 자동화를 켭니다. 위젯을 누른 시험과 구분합니다. `automationOff`와 `automationOn`은 기기 검증용으로 자동화 설정을 바꿉니다. 시험 후 원래 설정을 복원해야 합니다. `pausePlayback`은 자동화를 끄고 대상 음악을 일시정지합니다. `probe`, `sequence`, `cancel`, `cancelInitialization`, `menuSequence`는 기존 수동 복구·중단 검증에 사용합니다.
+`history`는 이력을 조회합니다. `automaticService`는 대상 종료·서비스 재생·자동 복구를 실제 시험하고 자동화를 켭니다. 위젯을 누른 시험과 구분합니다. `automationOff`와 `automationOn`은 기기 검증용으로 자동화 설정을 바꿉니다. 시험 후 원래 설정을 복원해야 합니다. `pausePlayback`은 자동화를 끄고 대상 음악을 일시정지합니다. `pauseTarget`은 자동화 설정을 유지하며 대상 음악만 일시정지합니다. `probe`, `sequence`, `cancel`, `cancelInitialization`, `menuSequence`는 기존 수동 복구·중단 검증에 사용합니다. `cancelExitWait`는 대상 종료 반환 직후 취소하여 후속 초기화·재생이 없음을 확인합니다.
 
 Git Flow에 따라 개발 중 앱 버전을 올리지 않고, master 병합 단계에서만 변경합니다. 이번 개발 기준은 `1.0.1 / versionCode 2`입니다.

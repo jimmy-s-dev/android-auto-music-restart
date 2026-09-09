@@ -106,9 +106,12 @@ object Runner {
         }
         return "$name(position=${state?.position})"
     }
-    private fun snapshot(control: IControl): RestartSequence.Snapshot {
-        val pids = control.inspect().split(Regex("\\s+")).filter { it.isNotBlank() }.toSet()
+    private fun snapshot(run: Run, control: IControl): RestartSequence.Snapshot {
+        val pids = GuardedCall.execute({ checkRun(run) }) { control.inspect() }
+            .split(Regex("\\s+")).filter { it.isNotBlank() }.toSet()
+        checkRun(run)
         val list = controllers()
+        checkRun(run)
         return RestartSequence.Snapshot(pids, list.map { it.sessionToken }.toSet(),
             list.joinToString { stateLabel(it) }.ifBlank { "세션 없음" })
     }
@@ -171,9 +174,10 @@ object Runner {
             control = connectedControl
             sequence = RestartSequence(object : RestartSequence.Port {
                 override fun check() = checkRun(run)
+                override fun now() = SystemClock.elapsedRealtime()
                 override fun waitFor(millis: Long) = Runner.waitFor(run, millis)
                 override fun requestPlayback() = Runner.requestPlayback(run, connectedControl)
-                override fun snapshot() = Runner.snapshot(connectedControl)
+                override fun snapshot() = Runner.snapshot(run, connectedControl)
                 override fun stopTarget() {
                     beforeStop(run, connectedControl)
                     GuardedCall.execute({ checkRun(run) }) { connectedControl.stopTarget() }
