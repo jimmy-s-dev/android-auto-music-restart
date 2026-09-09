@@ -67,7 +67,7 @@ object Runner {
             ?: list.firstOrNull()
         checkRun(run)
         if (controller == null) {
-            Store.log("첫 재생 요청: 백그라운드 서비스=${control.preparePlayback()}")
+            Store.log("첫 재생 요청: 백그라운드 서비스=${GuardedCall.execute({ checkRun(run) }) { control.preparePlayback() }}")
         } else {
             Store.log("첫 재생 요청: 상태=${stateLabel(controller)}")
             controller.transportControls.play()
@@ -76,9 +76,10 @@ object Runner {
 
     private fun play(run: Run, control: IControl): MediaController {
         checkRun(run)
+        Store.log("가상 화면에서 음악 앱 초기화 시작")
+        Store.log(GuardedCall.execute({ checkRun(run) }) { control.preparePlayback() })
         var list = controllers()
         if (list.isEmpty()) {
-            Store.log("백그라운드 재생 서비스 시작: ${control.preparePlayback()}")
             val deadline = SystemClock.elapsedRealtime() + 15000
             while (list.isEmpty() && SystemClock.elapsedRealtime() < deadline) {
                 waitFor(run, 250); list = controllers()
@@ -117,7 +118,7 @@ object Runner {
                 override fun waitFor(millis: Long) = Runner.waitFor(run, millis)
                 override fun requestPlayback() = Runner.requestPlayback(run, control)
                 override fun snapshot() = Runner.snapshot(control)
-                override fun stopTarget() { control.stopTarget() }
+                override fun stopTarget() { GuardedCall.execute({ checkRun(run) }) { control.stopTarget() } }
                 override fun confirmPlayback(): Any = play(run, control).sessionToken
                 override fun log(message: String) = Store.log(message)
             })
