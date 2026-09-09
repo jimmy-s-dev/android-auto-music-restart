@@ -22,6 +22,7 @@ class PrivilegedControl : IControl.Stub() {
         return result.trim()
     }
     override fun inspect(): String = command("/system/bin/pidof", Target.PACKAGE, allowEmpty = true)
+    override fun inspectHistory(): String = ProcessInspection.encode(ProcessInspection.inspect())
     override fun stopTarget(): String {
         before = hidden.capture()
         val result = command("/system/bin/am", "force-stop", "--user", "0", Target.PACKAGE)
