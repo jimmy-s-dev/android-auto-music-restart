@@ -11,26 +11,78 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 
 object Runner {
-    private data class Run(val manual: Boolean, val cancelled: AtomicBoolean = AtomicBoolean(false),
-        val deadline: Long = SystemClock.elapsedRealtime() + 100000)
+    private data class Run(val reason: RestartReason, val request: AutomaticRequest? = null,
+        val cancelled: AtomicBoolean = AtomicBoolean(false), @Volatile var stopped: Boolean = false,
+        var newPlayingToken: Any? = null,
+        val deadline: Long = SystemClock.elapsedRealtime() + 100000) {
+        val manual get() = reason == RestartReason.MANUAL
+    }
     @Volatile private var current: Run? = null
     val running get() = current != null
     @Synchronized fun cancel(reason: String) {
+        Store.main.post { AutoListener.instance?.suspendCurrent() }
         current?.let { it.cancelled.set(true); Store.log("중단 요청: $reason") }
     }
     fun cancelAutomatic(reason: String) { if (current?.manual == false) cancel(reason) }
+    fun onPlaybackObservation(token: Any, state: Int?) {
+        val run = current ?: return
+        if (run.manual || !run.stopped || token == run.request?.token) return
+        if (state == PlaybackState.STATE_PLAYING) run.newPlayingToken = token
+        if (token == run.newPlayingToken && (state == PlaybackState.STATE_PAUSED || state == PlaybackState.STATE_STOPPED))
+            cancelAutomatic("새 세션 재생 중 일시정지·정지")
+    }
     @Synchronized fun start(manual: Boolean, initialDelayMs: Long) {
+        require(manual) { "자동 실행에는 검증된 프로세스 요청이 필요합니다" }
+        launch(Run(RestartReason.MANUAL), initialDelayMs)
+    }
+    @Synchronized fun startAutomatic(request: AutomaticRequest) {
+        require(request.reason != RestartReason.MANUAL)
+        launch(Run(request.reason, request), 0)
+    }
+    private fun launch(run: Run, initialDelayMs: Long) {
         if (current != null) { Store.log("이미 실행 중 — 중복 요청 무시"); return }
-        val run = Run(manual)
+        run.request?.let {
+            if (!Store.processAllowed(it.processKey)) return
+            // Consume at acceptance, not at force-stop: connection failures must not loop.
+            Store.reserveAttempt(it.processKey)
+            Store.prefs.edit().putInt("automaticStarts", Store.prefs.getInt("automaticStarts", 0) + 1).commit()
+        }
         current = run
         Thread({ execute(run, initialDelayMs) }, "music-restart").start()
     }
     private fun checkRun(run: Run) {
-        if (run.cancelled.get() || (!run.manual && (!Store.enabled || !AutoListener.connected)))
-            throw CancellationException("요청 취소 또는 차량 연결 해제")
+        if (run.cancelled.get() || (!run.manual && !Store.enabled))
+            throw CancellationException("사용자 취소 또는 자동화 꺼짐")
         check(SystemClock.elapsedRealtime() < run.deadline) { "전체 실행 제한 시간(100초)을 초과했습니다" }
         check(Bridge.ready()) { "Shizuku 권한 또는 연결이 없어 중단했습니다" }
         check(AutoListener.instance != null) { "알림 접근 권한 또는 연결이 없어 중단했습니다" }
+        if (!run.stopped) run.request?.let { request ->
+            val controller = controllers().singleOrNull()
+            if (controller == null || controller.sessionToken != request.token)
+                throw CancellationException("대상 세션 교체·소멸")
+            val state = PlaybackMonitor.condition(controller.playbackState)
+            if (state == PlaybackCondition.INACTIVE) throw CancellationException("사용자가 재생을 멈췄습니다")
+            if (request.reason == RestartReason.BUFFERING && state != PlaybackCondition.BUFFERING)
+                throw CancellationException("버퍼링이 자연 복구됐습니다")
+            if (request.track != null && PlaybackMonitor.track(controller) != request.track)
+                throw CancellationException("대상 곡이 변경됐습니다")
+        }
+    }
+    private fun beforeStop(run: Run, control: IControl) {
+        checkRun(run)
+        val history = ProcessInspection.decode(GuardedCall.execute({ checkRun(run) }) { control.inspectHistory() })
+        run.request?.let { request ->
+            if (history.key != request.processKey) throw CancellationException("종료 직전 프로세스 식별값 변경·조회 실패")
+            if (history.activity == ActivityHistory.PRESENT) throw CancellationException("Activity 초기화 이력이 확인됐습니다")
+            if (request.reason == RestartReason.PREVENTIVE && history.activity != ActivityHistory.ABSENT)
+                throw CancellationException("Activity 이력 없음 판정을 유지할 수 없습니다")
+        }
+        checkRun(run)
+        history.key?.let { Store.beginAttempt(it) }
+        run.stopped = true // Subsequent session disappearance belongs to our force-stop.
+        if (!run.manual) {
+            Store.prefs.edit().putInt("automaticAttempts", Store.prefs.getInt("automaticAttempts", 0) + 1).commit()
+        }
     }
     private fun waitFor(run: Run, millis: Long) {
         val until = SystemClock.elapsedRealtime() + millis
@@ -54,9 +106,12 @@ object Runner {
         }
         return "$name(position=${state?.position})"
     }
-    private fun snapshot(control: IControl): RestartSequence.Snapshot {
-        val pids = control.inspect().split(Regex("\\s+")).filter { it.isNotBlank() }.toSet()
+    private fun snapshot(run: Run, control: IControl): RestartSequence.Snapshot {
+        val pids = GuardedCall.execute({ checkRun(run) }) { control.inspect() }
+            .split(Regex("\\s+")).filter { it.isNotBlank() }.toSet()
+        checkRun(run)
         val list = controllers()
+        checkRun(run)
         return RestartSequence.Snapshot(pids, list.map { it.sessionToken }.toSet(),
             list.joinToString { stateLabel(it) }.ifBlank { "세션 없음" })
     }
@@ -107,25 +162,34 @@ object Runner {
         val wake = Store.context.getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AutoMusicRestart:sequence")
         val bridge = Bridge()
+        var control: IControl? = null
+        var completed = false
         var sequence: RestartSequence? = null
         try {
             wake.acquire(120000)
-            Store.log("${if (run.manual) "수동 시험" else "차량 자동 실행"}: ${delay / 1000}초 후 시작")
+            Store.log("${run.reason.label}: ${delay / 1000}초 후 시작")
+            if (run.manual) Store.clearPendingAttempt()
             waitFor(run, delay)
-            val control = bridge.connect()
+            val connectedControl = bridge.connect()
+            control = connectedControl
             sequence = RestartSequence(object : RestartSequence.Port {
                 override fun check() = checkRun(run)
+                override fun now() = SystemClock.elapsedRealtime()
                 override fun waitFor(millis: Long) = Runner.waitFor(run, millis)
-                override fun requestPlayback() = Runner.requestPlayback(run, control)
-                override fun snapshot() = Runner.snapshot(control)
-                override fun stopTarget() { GuardedCall.execute({ checkRun(run) }) { control.stopTarget() } }
-                override fun confirmPlayback(): Any = play(run, control).sessionToken
+                override fun requestPlayback() = Runner.requestPlayback(run, connectedControl)
+                override fun snapshot() = Runner.snapshot(run, connectedControl)
+                override fun stopTarget() {
+                    beforeStop(run, connectedControl)
+                    GuardedCall.execute({ checkRun(run) }) { connectedControl.stopTarget() }
+                }
+                override fun confirmPlayback(): Any = play(run, connectedControl).sessionToken
                 override fun log(message: String) = Store.log(message)
             })
             sequence.execute()
-            Store.log("완료: 새 세션 재생, PID=${control.inspect()} (실차 버퍼링 해결 여부는 별도 확인)")
+            Store.log("완료: 새 세션 재생, PID=${connectedControl.inspect()} (장시간 재생 여부는 별도 확인)")
             Store.prefs.edit().putString("lastResult", "success").commit()
             Store.context.getSystemService(android.app.NotificationManager::class.java).cancel(1)
+            completed = true
         } catch (e: CancellationException) {
             Store.log("취소: ${e.message}")
             Store.prefs.edit().putString("lastResult", "cancelled").commit()
@@ -133,9 +197,15 @@ object Runner {
             Store.fail("실행 실패 [${sequence?.stage ?: "시작 대기·연결"}]: ${e.message ?: e.javaClass.simpleName}")
             Store.prefs.edit().putString("lastResult", "failed: ${e.message}").commit()
         } finally {
-            bridge.close()
+            if (completed && run.stopped) runCatching {
+                Store.finishAttempt(control?.let { ProcessInspection.decode(it.inspectHistory()).key })
+            }
+            // A failed/cancelled Binder initialization must lose its display immediately.
+            // Successful calls keep the reusable service; destroy/rebind races caused failures.
+            bridge.close(destroy = !completed)
             if (wake.isHeld) wake.release()
             synchronized(this) { if (current === run) current = null }
+            Store.main.post { AutoListener.instance?.refresh(true) }
         }
     }
 }

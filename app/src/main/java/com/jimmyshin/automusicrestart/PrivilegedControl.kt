@@ -17,11 +17,12 @@ class PrivilegedControl : IControl.Stub() {
             throw IllegalStateException("명령 응답 시간 초과")
         }
         val result = process.inputStream.bufferedReader().use { it.readText().take(4096) }
-        if (process.exitValue() != 0 && !(allowEmpty && result.isBlank()))
+        if (process.exitValue() != 0 && !(allowEmpty && process.exitValue() == 1 && result.isBlank()))
             throw IllegalStateException("명령 실패 ${process.exitValue()}: $result")
         return result.trim()
     }
     override fun inspect(): String = command("/system/bin/pidof", Target.PACKAGE, allowEmpty = true)
+    override fun inspectHistory(): String = ProcessInspection.encode(ProcessInspection.inspect())
     override fun stopTarget(): String {
         before = hidden.capture()
         val result = command("/system/bin/am", "force-stop", "--user", "0", Target.PACKAGE)
