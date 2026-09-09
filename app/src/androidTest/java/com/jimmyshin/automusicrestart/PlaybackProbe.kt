@@ -186,4 +186,40 @@ class PlaybackProbe(private val context: Context) {
             "Insufficient reported playback progress over ${seconds}s: ${after.positionMs - before.positionMs}ms"
         }
     }
+
+    /** Allows a natural next-track transition; requires first track >=185s and next >=90s. */
+    fun observeTwoTracks(report: (String) -> Unit) {
+        val initial = controller()
+        val firstTrack = checkNotNull(PlaybackMonitor.track(initial))
+        val start = SystemClock.elapsedRealtime()
+        var secondTrack: String? = null
+        var secondStart: Long? = null
+        var stalled: Long? = null
+        var lastReport = 0L
+        var candidate: String? = null
+        var candidateSince = start
+        while (SystemClock.elapsedRealtime() - start < 15 * 60000) {
+            val now = SystemClock.elapsedRealtime()
+            val current = controller()
+            check(current.sessionToken == initial.sessionToken) { "Session replaced during observation" }
+            val track = checkNotNull(PlaybackMonitor.track(current))
+            val playing = current.playbackState?.state == PlaybackState.STATE_PLAYING
+            if (!playing || candidate != track) { candidate = if (playing) track else null; candidateSince = now }
+            val stable = playing && now - candidateSince >= 3000
+            if (stable && track != firstTrack && secondTrack == null) {
+                check(now - start >= 185000) { "First track changed before 185s; cannot count fixed-track pass" }
+                secondTrack = track; secondStart = now
+            }
+            if (stable && secondTrack != null) check(track == secondTrack) { "Second track changed before 90s" }
+            if (playing) stalled = null else if (stalled == null) stalled = now
+            check(stalled == null || now - checkNotNull(stalled) < 10000) { "Continuous playback interruption >=10s" }
+            if (now - lastReport >= 10000) {
+                report("elapsed=${now-start}, nextElapsed=${secondStart?.let { now-it }}, ${describe(false)}")
+                lastReport = now
+            }
+            if (secondStart != null && now - secondStart >= 90000 && playing && track == secondTrack) return
+            Thread.sleep(1000)
+        }
+        error("No complete first/next track observation within 15 minutes")
+    }
 }
