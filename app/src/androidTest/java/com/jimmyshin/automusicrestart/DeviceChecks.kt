@@ -29,6 +29,19 @@ class DeviceChecks : Instrumentation() {
             result.putString("screenOn", targetContext.getSystemService(android.os.PowerManager::class.java).isInteractive.toString())
             when (scenario) {
                 "probe" -> Unit
+                "pauseTarget" -> {
+                    val sessions = targetContext.getSystemService(android.media.session.MediaSessionManager::class.java)
+                        .getActiveSessions(android.content.ComponentName(targetContext, AutoListener::class.java))
+                        .filter { it.packageName == Target.PACKAGE }
+                    check(sessions.isNotEmpty()) { "Target session missing" }
+                    sessions.forEach { it.transportControls.pause() }
+                    val pauseBy = SystemClock.elapsedRealtime() + 5000
+                    while (sessions.any { it.playbackState?.state != android.media.session.PlaybackState.STATE_PAUSED }
+                        && SystemClock.elapsedRealtime() < pauseBy) Thread.sleep(200)
+                    check(sessions.all { it.playbackState?.state == android.media.session.PlaybackState.STATE_PAUSED }) {
+                        "Target did not pause"
+                    }
+                }
                 "finishSetup" -> {
                     runOnMainSync {
                         if (Store.prefs.getString("fingerprint", "").isNullOrEmpty()) {

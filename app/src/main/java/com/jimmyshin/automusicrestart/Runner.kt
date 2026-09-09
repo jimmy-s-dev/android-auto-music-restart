@@ -42,6 +42,38 @@ object Runner {
     private fun controllers(): List<MediaController> = Store.context.getSystemService(MediaSessionManager::class.java)
         .getActiveSessions(ComponentName(Store.context, AutoListener::class.java)).filter { it.packageName == Target.PACKAGE }
 
+    private fun stateLabel(controller: MediaController): String {
+        val state = controller.playbackState
+        val name = when (state?.state) {
+            PlaybackState.STATE_PLAYING -> "PLAYING"
+            PlaybackState.STATE_BUFFERING -> "BUFFERING"
+            PlaybackState.STATE_PAUSED -> "PAUSED"
+            PlaybackState.STATE_STOPPED -> "STOPPED"
+            PlaybackState.STATE_ERROR -> "ERROR"
+            else -> state?.state?.toString() ?: "UNKNOWN"
+        }
+        return "$name(position=${state?.position})"
+    }
+    private fun snapshot(control: IControl): RestartSequence.Snapshot {
+        val pids = control.inspect().split(Regex("\\s+")).filter { it.isNotBlank() }.toSet()
+        val list = controllers()
+        return RestartSequence.Snapshot(pids, list.map { it.sessionToken }.toSet(),
+            list.joinToString { stateLabel(it) }.ifBlank { "세션 없음" })
+    }
+    private fun requestPlayback(run: Run, control: IControl) {
+        checkRun(run)
+        val list = controllers()
+        val controller = list.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
+            ?: list.firstOrNull()
+        checkRun(run)
+        if (controller == null) {
+            Store.log("첫 재생 요청: 백그라운드 서비스=${control.preparePlayback()}")
+        } else {
+            Store.log("첫 재생 요청: 상태=${stateLabel(controller)}")
+            controller.transportControls.play()
+        }
+    }
+
     private fun play(run: Run, control: IControl): MediaController {
         checkRun(run)
         var list = controllers()
@@ -61,7 +93,10 @@ object Runner {
         val deadline = SystemClock.elapsedRealtime() + 15000
         while (controller.playbackState?.state != PlaybackState.STATE_PLAYING && SystemClock.elapsedRealtime() < deadline)
             waitFor(run, 300)
-        check(controller.playbackState?.state == PlaybackState.STATE_PLAYING) { "15초 안에 재생 상태가 되지 않았습니다" }
+        Store.log("최종 재생 상태=${stateLabel(controller)}")
+        check(controller.playbackState?.state == PlaybackState.STATE_PLAYING) {
+            "15초 안에 재생 상태가 되지 않았습니다: ${stateLabel(controller)}"
+        }
         val keyguard = Store.context.getSystemService(KeyguardManager::class.java)
         val power = Store.context.getSystemService(PowerManager::class.java)
         Store.log("백그라운드 재생 확인 (보안잠금=${keyguard.isDeviceLocked}, 잠금화면=${keyguard.isKeyguardLocked}, 화면켜짐=${power.isInteractive})")
@@ -71,26 +106,22 @@ object Runner {
         val wake = Store.context.getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AutoMusicRestart:sequence")
         val bridge = Bridge()
+        var sequence: RestartSequence? = null
         try {
             wake.acquire(120000)
             Store.log("${if (run.manual) "수동 시험" else "차량 자동 실행"}: ${delay / 1000}초 후 시작")
             waitFor(run, delay)
             val control = bridge.connect()
-            val before = play(run, control)
-            waitFor(run, 5000)
-            val beforePid = control.inspect()
-            checkRun(run)
-            Store.log("강제 종료 전 PID=$beforePid, 대상 세션=${controllers().size}")
-            control.stopTarget()
-            waitFor(run, 2000)
-            val afterPid = control.inspect()
-            val stale = controllers().any { it.sessionToken == before.sessionToken }
-            Store.log("강제 종료 후 PID=${afterPid.ifBlank { "없음" }}, 이전 세션=$stale")
-            val oldPids = beforePid.split(" ").filter { it.isNotBlank() }.toSet()
-            check(afterPid.split(" ").none { it in oldPids }) { "종료 전 프로세스가 남아 있습니다" }
-            check(!stale) { "이전 미디어 세션이 남아 있어 재시작을 중단했습니다" }
-            val after = play(run, control)
-            check(after.sessionToken != before.sessionToken) { "새 미디어 세션 생성이 확인되지 않았습니다" }
+            sequence = RestartSequence(object : RestartSequence.Port {
+                override fun check() = checkRun(run)
+                override fun waitFor(millis: Long) = Runner.waitFor(run, millis)
+                override fun requestPlayback() = Runner.requestPlayback(run, control)
+                override fun snapshot() = Runner.snapshot(control)
+                override fun stopTarget() { control.stopTarget() }
+                override fun confirmPlayback(): Any = play(run, control).sessionToken
+                override fun log(message: String) = Store.log(message)
+            })
+            sequence.execute()
             Store.log("완료: 새 세션 재생, PID=${control.inspect()} (실차 버퍼링 해결 여부는 별도 확인)")
             Store.prefs.edit().putString("lastResult", "success").commit()
             Store.context.getSystemService(android.app.NotificationManager::class.java).cancel(1)
@@ -98,7 +129,7 @@ object Runner {
             Store.log("취소: ${e.message}")
             Store.prefs.edit().putString("lastResult", "cancelled").commit()
         } catch (e: Exception) {
-            Store.fail("실행 실패: ${e.message ?: e.javaClass.simpleName}")
+            Store.fail("실행 실패 [${sequence?.stage ?: "시작 대기·연결"}]: ${e.message ?: e.javaClass.simpleName}")
             Store.prefs.edit().putString("lastResult", "failed: ${e.message}").commit()
         } finally {
             bridge.close()
