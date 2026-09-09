@@ -37,7 +37,7 @@ class MainActivity : Activity() {
             } })
         }
         text("차량 음악 재시작", 26f)
-        text("연결 후 5초 대기 → 5초 재생 → 종료 → 2초 후 재생\nMorphe YouTube Music 전용 · PC 없이 실행")
+        text("연결 후 5초 대기 → 재생 요청 후 5초 대기 → 종료 → 2초 후 초기화·재생\nMorphe YouTube Music 전용 · PC 없이 실행")
         status = text("")
         layout.addView(Switch(this).apply {
             text = "자동화 사용"; isChecked = Store.enabled

@@ -29,6 +29,53 @@ class DeviceChecks : Instrumentation() {
             result.putString("screenOn", targetContext.getSystemService(android.os.PowerManager::class.java).isInteractive.toString())
             when (scenario) {
                 "probe" -> Unit
+                "mediaProbe", "recoverBuffering", "reloadCurrentItem", "stopAndPlay", "browseRoot", "observePlayback" -> {
+                    val probe = PlaybackProbe(targetContext)
+                    result.putString("mediaBefore", probe.describe())
+                    if (scenario == "browseRoot") {
+                        val outcome = probe.browseRoot { sample ->
+                            sendStatus(1, Bundle().apply { putString("browseSample", sample) })
+                        }
+                        result.putString("browseOutcome", outcome)
+                        check(outcome == "CONNECTED") { "Browse: $outcome" }
+                    }
+                    if (scenario == "stopAndPlay") {
+                        val outcome = probe.stopAndPlay { sample ->
+                            sendStatus(1, Bundle().apply { putString("mediaSample", sample) })
+                        }
+                        result.putString("stopPlayOutcome", outcome)
+                        result.putString("mediaAfter", probe.describe())
+                        check(outcome == "PLAYING") { "Stop/play: $outcome" }
+                    }
+                    if (scenario == "reloadCurrentItem") {
+                        val outcome = probe.reloadCurrentItem()
+                        result.putString("reloadOutcome", outcome)
+                        result.putString("mediaAfter", probe.describe())
+                        check(outcome == "PLAYING") { "Queue item reload: $outcome" }
+                    }
+                    if (scenario == "recoverBuffering") {
+                        val outcome = probe.recover()
+                        result.putString("recoveryOutcome", outcome.name)
+                        result.putString("mediaAfter", probe.describe())
+                        check(outcome == BufferingRecovery.Outcome.PLAYING) { "Recovery: $outcome" }
+                    }
+                    if (scenario == "observePlayback") probe.observe(185) { sample ->
+                        sendStatus(1, Bundle().apply { putString("mediaSample", sample) })
+                    }
+                }
+                "pauseTarget" -> {
+                    val sessions = targetContext.getSystemService(android.media.session.MediaSessionManager::class.java)
+                        .getActiveSessions(android.content.ComponentName(targetContext, AutoListener::class.java))
+                        .filter { it.packageName == Target.PACKAGE }
+                    check(sessions.isNotEmpty()) { "Target session missing" }
+                    sessions.forEach { it.transportControls.pause() }
+                    val pauseBy = SystemClock.elapsedRealtime() + 5000
+                    while (sessions.any { it.playbackState?.state != android.media.session.PlaybackState.STATE_PAUSED }
+                        && SystemClock.elapsedRealtime() < pauseBy) Thread.sleep(200)
+                    check(sessions.all { it.playbackState?.state == android.media.session.PlaybackState.STATE_PAUSED }) {
+                        "Target did not pause"
+                    }
+                }
                 "finishSetup" -> {
                     runOnMainSync {
                         if (Store.prefs.getString("fingerprint", "").isNullOrEmpty()) {
@@ -47,15 +94,75 @@ class DeviceChecks : Instrumentation() {
                     check(!Runner.running) { "Missing privilege did not terminate the run" }
                     check(Store.prefs.getString("lastResult", "").orEmpty().startsWith("failed:"))
                 }
-                "sequence", "cancel", "disconnect", "revokeListener" -> {
+                "menuSequence", "cancelInitialization" -> {
+                    check(Bridge.ready() && AutoListener.instance != null) { "Permissions not ready" }
+                    val displays = targetContext.getSystemService(android.hardware.display.DisplayManager::class.java)
+                    try {
+                        if (scenario == "menuSequence") {
+                            val activity = startActivitySync(android.content.Intent(targetContext, MainActivity::class.java)
+                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                            runOnMainSync {
+                                fun find(view: android.view.View): android.widget.Button? {
+                                    if (view is android.widget.Button && view.text.toString() == "15초 후 시험 (화면을 잠그세요)") return view
+                                    if (view is android.view.ViewGroup) for (index in 0 until view.childCount) {
+                                        find(view.getChildAt(index))?.let { return it }
+                                    }
+                                    return null
+                                }
+                                try { check(checkNotNull(find(activity.window.decorView)).performClick()) { "Menu click failed" } }
+                                finally { activity.finish() }
+                            }
+                        } else {
+                            runOnMainSync { Runner.start(true, 0) }
+                            val displayBy = SystemClock.elapsedRealtime() + 25000
+                            while (displays.displays.none { it.name == HiddenPlayback.DISPLAY_NAME } &&
+                                Runner.running && SystemClock.elapsedRealtime() < displayBy) Thread.sleep(100)
+                            check(displays.displays.any { it.name == HiddenPlayback.DISPLAY_NAME }) { "Temporary display was never created" }
+                            runOnMainSync { Runner.cancel("가상 초기화 중 사용자 취소 시험") }
+                        }
+                        val finishBy = SystemClock.elapsedRealtime() + 110000
+                        while (Runner.running && SystemClock.elapsedRealtime() < finishBy) Thread.sleep(100)
+                        check(!Runner.running) { "Runner did not terminate" }
+                        val expected = if (scenario == "menuSequence") "success" else "cancelled"
+                        val actual = Store.prefs.getString("lastResult", "")
+                        check(actual == expected) { "Unexpected result: $actual" }
+                        val removeBy = SystemClock.elapsedRealtime() + 5000
+                        while (displays.displays.any { it.name == HiddenPlayback.DISPLAY_NAME } &&
+                            SystemClock.elapsedRealtime() < removeBy) Thread.sleep(100)
+                        check(displays.displays.none { it.name == HiddenPlayback.DISPLAY_NAME }) { "Temporary display leaked" }
+                        if (scenario == "menuSequence") PlaybackProbe(targetContext).observe(185) { sample ->
+                            sendStatus(1, Bundle().apply { putString("mediaSample", sample) })
+                        }
+                    } finally {
+                        if (Runner.running) Runner.cancel("기기 시험 종료")
+                    }
+                }
+                "sequence", "holdPotHelper", "cancel", "disconnect", "revokeListener" -> {
                     check(Bridge.ready()) { "Shizuku permission not ready" }
                     check(AutoListener.instance != null) { "Notification listener not ready" }
                     val previousEnabled = Store.enabled
+                    val potReady = java.util.concurrent.CountDownLatch(1)
+                    val potConnection = object : android.content.ServiceConnection {
+                        override fun onServiceConnected(name: android.content.ComponentName, service: android.os.IBinder) {
+                            potReady.countDown()
+                        }
+                        override fun onServiceDisconnected(name: android.content.ComponentName) = Unit
+                    }
+                    var potBound = false
                     try {
+                        if (scenario == "holdPotHelper") {
+                            runOnMainSync {
+                                potBound = targetContext.bindService(android.content.Intent("app.morphe.pot.helper.potokens.service.START")
+                                    .setComponent(android.content.ComponentName("app.morphe.pot.helper", "app.morphe.pot.helper.potokens.PoTokenService")),
+                                    potConnection, android.content.Context.BIND_AUTO_CREATE or android.content.Context.BIND_IMPORTANT)
+                            }
+                            check(potBound && potReady.await(5, java.util.concurrent.TimeUnit.SECONDS)) { "PotHelper keepalive binding failed" }
+                            sendStatus(1, Bundle().apply { putString("potHelper", "Binding held during test") })
+                        }
                         runOnMainSync {
                             if (scenario == "disconnect") { Store.enabled = true; AutoListener.connected = true }
                             Runner.start(scenario != "disconnect", when (scenario) {
-                                "sequence" -> 5000
+                                "sequence", "holdPotHelper" -> 5000
                                 "revokeListener" -> 60000
                                 else -> 15000
                             })
@@ -77,11 +184,18 @@ class DeviceChecks : Instrumentation() {
                         check(!Runner.running) { "Runner did not terminate" }
                         val actual = Store.prefs.getString("lastResult", "").orEmpty()
                         when (scenario) {
-                            "sequence" -> check(actual == "success") { "Unexpected result: $actual" }
+                            "sequence", "holdPotHelper" -> check(actual == "success") { "Unexpected result: $actual" }
                             "revokeListener" -> check(actual.startsWith("failed:") && actual.contains("알림")) { "Unexpected result: $actual" }
                             else -> check(actual == "cancelled") { "Unexpected result: $actual" }
                         }
+                        if (scenario == "holdPotHelper") {
+                            // Read-only observation; missing queue publication is reported explicitly.
+                            PlaybackProbe(targetContext).observe(75, requireQueue = false) { sample ->
+                                sendStatus(1, Bundle().apply { putString("mediaSample", sample) })
+                            }
+                        }
                     } finally {
+                        if (potBound) runOnMainSync { targetContext.unbindService(potConnection) }
                         if (Runner.running) Runner.cancel("기기 시험 종료")
                         if (scenario == "disconnect") {
                             runOnMainSync { Store.enabled = previousEnabled; AutoListener.connected = false }
