@@ -4,5 +4,6 @@ interface IControl {
     String stopTarget() = 1;
     String preparePlayback() = 2;
     String inspectHistory() = 3;
+    String getImplementationId() = 4;
     void destroy() = 16777114;
 }

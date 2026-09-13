@@ -7,6 +7,7 @@ import java.util.concurrent.TimeUnit
 
 /** Fixed target-only operations. No caller-supplied shell or package names. */
 class PrivilegedControl : IControl.Stub() {
+    override fun getImplementationId(): String = BuildConfig.CONTROL_BUILD_ID
     private val hidden = HiddenPlayback { command(*it) }
     private var initializeNext = false
     private var before: HiddenPlayback.Content? = null
