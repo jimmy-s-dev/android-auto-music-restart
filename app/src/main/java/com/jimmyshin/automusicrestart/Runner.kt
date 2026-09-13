@@ -133,25 +133,13 @@ object Runner {
         checkRun(run)
         Store.log("가상 화면에서 음악 앱 초기화 시작")
         Store.log(GuardedCall.execute({ checkRun(run) }) { control.preparePlayback() })
-        var list = controllers()
-        if (list.isEmpty()) {
-            val deadline = SystemClock.elapsedRealtime() + 15000
-            while (list.isEmpty() && SystemClock.elapsedRealtime() < deadline) {
-                waitFor(run, 250); list = controllers()
-            }
-        }
-        check(list.isNotEmpty()) { "백그라운드 미디어 세션 생성 시간 초과(15초)" }
-        val controller = list.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
-            ?: list.first()
         checkRun(run)
-        // Explicit PLAY is idempotent and never pauses another player.
-        controller.transportControls.play()
-        val deadline = SystemClock.elapsedRealtime() + 15000
-        while (controller.playbackState?.state != PlaybackState.STATE_PLAYING && SystemClock.elapsedRealtime() < deadline)
-            waitFor(run, 300)
+        val controller = controllers().singleOrNull()
+        check(controller != null) { "최종 곡 확인 후 대상 세션이 없거나 여러 개입니다" }
+        // HiddenPlayback already confirmed PLAYING and content. Do not override a subsequent user stop.
         Store.log("최종 재생 상태=${stateLabel(controller)}")
         check(controller.playbackState?.state == PlaybackState.STATE_PLAYING) {
-            "15초 안에 재생 상태가 되지 않았습니다: ${stateLabel(controller)}"
+            "최종 곡 확인 후 재생이 중단됐습니다: ${stateLabel(controller)}"
         }
         val keyguard = Store.context.getSystemService(KeyguardManager::class.java)
         val power = Store.context.getSystemService(PowerManager::class.java)

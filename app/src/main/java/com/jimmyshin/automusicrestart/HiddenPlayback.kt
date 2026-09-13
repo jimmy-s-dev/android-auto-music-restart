@@ -37,19 +37,19 @@ class HiddenPlayback(private val command: (Array<String>) -> String) {
         context.getSystemService(MediaSessionManager::class.java)
     }
     private fun controllers() = sessions.getActiveSessions(null).filter { it.packageName == Target.PACKAGE }
-    data class Content(val track: List<String?>, val queue: List<List<String?>>?)
+    data class Content(val track: ContentVerification.Track?, val queue: List<List<String?>>?)
     private fun content(controller: MediaController): Content? {
-        val metadata = controller.metadata ?: return null
-        val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)?.takeIf { it.isNotBlank() } ?: return null
+        val metadata = controller.metadata
         val queue = controller.queue?.takeIf { it.isNotEmpty() }?.map {
             val item = it.description
             // Queue IDs are session-local and change on a normal Activity restart.
             listOf(item.mediaId, item.title?.toString(), item.subtitle?.toString(),
                 item.description?.toString(), item.mediaUri?.toString())
         }
-        return Content(listOf(title, metadata.getString(MediaMetadata.METADATA_KEY_ARTIST),
-            metadata.getString(MediaMetadata.METADATA_KEY_ALBUM),
-            metadata.getLong(MediaMetadata.METADATA_KEY_DURATION).toString()), queue)
+        return Content(metadata?.let { ContentVerification.Track(
+            it.getString(MediaMetadata.METADATA_KEY_TITLE), it.getString(MediaMetadata.METADATA_KEY_ARTIST),
+            it.getString(MediaMetadata.METADATA_KEY_ALBUM),
+            it.getLong(MediaMetadata.METADATA_KEY_DURATION).takeIf { duration -> duration > 0 }) }, queue)
     }
     fun capture(): Content? {
         val list = controllers()
@@ -57,13 +57,31 @@ class HiddenPlayback(private val command: (Array<String>) -> String) {
         return list.singleOrNull()?.let(::content)
     }
     private fun verifyContent(controller: MediaController, before: Content?): String {
-        if (before == null) return "이전 곡 정보 없음: 곡·목록 비교 불가"
-        val after = content(controller)
-        check(after != null && before.track == after.track) {
-            "현재 곡이 재시작 전과 달라 재생을 중단했습니다"
-        }
+        var after: Content? = null
+        val result = ContentVerification(object : ContentVerification.Port {
+            override fun check() {
+                if (Thread.currentThread().isInterrupted) throw InterruptedException("곡 확인 취소")
+                val active = controllers()
+                check(active.size == 1 && active.single().sessionToken == controller.sessionToken) {
+                    "곡 확인 중 대상 세션이 교체·소멸했거나 여러 개입니다"
+                }
+                // Once PLAYING was observed, a pause/stop must never be followed by another PLAY.
+                check(controller.playbackState?.state in setOf(PlaybackState.STATE_PLAYING,
+                    PlaybackState.STATE_BUFFERING, PlaybackState.STATE_CONNECTING)) {
+                    "곡 확인 중 재생이 일시정지·정지됐거나 상태를 확인할 수 없습니다"
+                }
+            }
+            override fun snapshot(): ContentVerification.Snapshot {
+                after = content(controller)
+                return ContentVerification.Snapshot(after?.track, controller.playbackState?.state == PlaybackState.STATE_PLAYING)
+            }
+            override fun now() = SystemClock.elapsedRealtime()
+            override fun waitFor(millis: Long) = Thread.sleep(millis)
+            override fun pause() { check(); controller.transportControls.pause() }
+            override fun log(message: String) { android.util.Log.i("AutoMusicRestart", message) }
+        }).execute(before?.track)
         // User explicitly prioritizes the current song and permits Morphe to rebuild its upcoming queue.
-        return "현재 곡 동일, 목록=${if (before.queue == null) "비교 불가" else if (before.queue == after.queue) "동일" else "재구성 허용"}, 개수=${after.queue?.size}"
+        return "${result.diagnostic}, 목록=${if (before?.queue == null) "비교 불가" else if (before.queue == after?.queue) "동일" else "재구성 허용"}, 개수=${after?.queue?.size}"
     }
     private fun verifyPlacement(expected: Int) {
         val service = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)
@@ -131,12 +149,7 @@ class HiddenPlayback(private val command: (Array<String>) -> String) {
                 while (controller.playbackState?.state != PlaybackState.STATE_PLAYING && SystemClock.elapsedRealtime() < playDeadline)
                     Thread.sleep(200)
                 check(controller.playbackState?.state == PlaybackState.STATE_PLAYING) { "가상 초기화 후 재생 확인 실패(15초)" }
-                try {
-                    contentDescription = verifyContent(controller, before)
-                } catch (failure: IllegalStateException) {
-                    controller.transportControls.pause()
-                    throw failure
-                }
+                contentDescription = verifyContent(controller, before)
             }
             override fun release() {
                 try { display?.release() }
