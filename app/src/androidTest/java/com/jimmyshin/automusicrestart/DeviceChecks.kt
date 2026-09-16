@@ -16,7 +16,48 @@ class DeviceChecks : Instrumentation() {
         observeSeconds = arguments?.getString("seconds")?.toIntOrNull()?.coerceIn(30, 600) ?: 185
         start()
     }
+    /** No Activity, listener rebind, preferences change or music transport call in this scenario. */
+    private fun verifyControlIdentity() {
+        val result = Bundle()
+        try {
+            val manager = targetContext.getSystemService(android.media.session.MediaSessionManager::class.java)
+            fun media() = manager.getActiveSessions(android.content.ComponentName(targetContext, AutoListener::class.java))
+                .filter { it.packageName == Target.PACKAGE }.map {
+                    Triple(it.sessionToken, it.playbackState?.state, it.playbackState?.position)
+                }
+            val before = media()
+            check(before.all { it.second == android.media.session.PlaybackState.STATE_STOPPED ||
+                it.second == android.media.session.PlaybackState.STATE_PAUSED }) { "Music must already be stopped" }
+            check(!Runner.running) { "Recovery already running" }
+            val enabled = Store.enabled
+            val starts = Store.prefs.getInt("automaticStarts", 0)
+            var firstBinder: android.os.IBinder? = null
+            repeat(2) { index ->
+                Bridge().use { bridge ->
+                    val control = bridge.connect()
+                    val id = control.implementationId
+                    check(id == BuildConfig.CONTROL_BUILD_ID) { "Implementation mismatch" }
+                    if (index == 0) firstBinder = control.asBinder()
+                    else check(firstBinder == control.asBinder()) { "Same implementation was unnecessarily replaced" }
+                    result.putString("implementation${index + 1}", id)
+                }
+            }
+            check(media() == before) { "Media session/state/position changed" }
+            check(Store.enabled == enabled && Store.prefs.getInt("automaticStarts", 0) == starts && !Runner.running) {
+                "Automation state changed"
+            }
+            result.putString("result", "PASS: controlIdentity")
+            result.putString("serviceReused", "true")
+            result.putString("mediaUnchanged", "true")
+            result.putString("automationEnabled", enabled.toString())
+            finish(Activity.RESULT_OK, result)
+        } catch (e: Exception) {
+            result.putString("result", "FAIL: ${e.message}")
+            finish(Activity.RESULT_CANCELED, result)
+        }
+    }
     override fun onStart() {
+        if (scenario == "controlIdentity") { verifyControlIdentity(); return }
         val result = Bundle()
         try {
             runOnMainSync {

@@ -62,7 +62,14 @@ Android 13 이상, Kotlin / Android Gradle Plugin 9.2.1 / Gradle 9.4.1 / SDK 36�
 ./build.ps1
 ```
 
-설치 APK는 `app/build/outputs/apk/release/app-release.apk`, 기기 시험 전용 APK는 `app/build/outputs/apk/androidTest/release/app-release-androidTest.apk`입니다. 앱 ID는 `com.jimmyshin.automusicrestart`를 유지합니다. 일반 설치 APK에는 외부 시험 진입점을 추가하지 않습니다. AIDL 기존 트랜잭션 0·1·2는 유지하고 3에 대상 이력 조회를 추가했습니다. Shizuku 제어 서비스의 IPC revision은 앱 버전과 별개로 관리합니다.
+설치 APK는 `app/build/outputs/apk/release/app-release.apk`, 기기 시험 전용 APK는 `app/build/outputs/apk/androidTest/release/app-release-androidTest.apk`입니다. 앱 ID는 `com.jimmyshin.automusicrestart`를 유지합니다. 일반 설치 APK에는 외부 시험 진입점을 추가하지 않습니다. AIDL 트랜잭션 0·1·2·3은 유지하고 4에 읽기 전용 구현 식별값 조회를 추가했습니다. Shizuku 서비스 버전은 메인 구현·AIDL·Manifest·빌드 설정의 SHA-256에서 자동 생성하며, 연결 직후 전체 식별값이 일치해야 음악 제어를 허용합니다. 생성물·개인 서명 파일은 해시 입력에서 제외합니다. `build.ps1`은 식별값 재현성·소스 변경 감지·생성물 제외 검사도 실행합니다.
+
+정지 중인 음악을 조작하지 않고 서비스 교체·구현 일치·동일 서비스 재사용만 확인하려면 시험 APK를 설치한 뒤 다음 명령을 사용합니다. 설정 변경이나 Activity 실행 없이 검사하며, 완료 후 시험 APK를 제거합니다.
+
+```powershell
+adb -s DEVICE shell am instrument -w -e scenario controlIdentity com.jimmyshin.automusicrestart.test/com.jimmyshin.automusicrestart.DeviceChecks
+adb -s DEVICE uninstall com.jimmyshin.automusicrestart.test
+```
 
 ```powershell
 adb -s DEVICE shell am instrument -w -e scenario history com.jimmyshin.automusicrestart.test/com.jimmyshin.automusicrestart.DeviceChecks
@@ -71,4 +78,4 @@ adb -s DEVICE shell am instrument -w -e scenario automaticService com.jimmyshin.
 
 `history`는 이력을 조회합니다. `automaticService`는 대상 종료·서비스 재생·자동 복구를 실제 시험하고 자동화를 켭니다. 위젯을 누른 시험과 구분합니다. `automationOff`와 `automationOn`은 기기 검증용으로 자동화 설정을 바꿉니다. 시험 후 원래 설정을 복원해야 합니다. `pausePlayback`은 자동화를 끄고 대상 음악을 일시정지합니다. `pauseTarget`은 자동화 설정을 유지하며 대상 음악만 일시정지합니다. `probe`, `sequence`, `cancel`, `cancelInitialization`, `menuSequence`는 기존 수동 복구·중단 검증에 사용합니다. `cancelExitWait`는 대상 종료 반환 직후 취소하여 후속 초기화·재생이 없음을 확인합니다.
 
-Git Flow에 따라 개발 중 앱 버전을 올리지 않고, master 병합 단계에서만 변경합니다. 이번 개발 기준은 `1.0.1 / versionCode 2`입니다.
+Git Flow에 따라 개발 중 앱 버전을 올리지 않고, 릴리스 브랜치에서 변경한 뒤 master와 develop에 반영합니다. 현재 릴리스 기준은 `1.0.3 / versionCode 4`입니다.

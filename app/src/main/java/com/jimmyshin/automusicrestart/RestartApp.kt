@@ -70,7 +70,8 @@ object Store {
             android.content.Intent(context, MainActivity::class.java), android.app.PendingIntent.FLAG_IMMUTABLE)
         val notification = android.app.Notification.Builder(context, "recovery_status")
             .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle("음악 재시작 확인 필요")
-            .setContentText(message).setContentIntent(intent).setAutoCancel(true).setOnlyAlertOnce(true).build()
+            // Keep comparison diagnostics in history; the notification presents the actionable reason.
+            .setContentText(message.substringBefore("; 곡 확인:")).setContentIntent(intent).setAutoCancel(true).setOnlyAlertOnce(true).build()
         runCatching { context.getSystemService(NotificationManager::class.java).notify(1, notification) }
     }
 }
