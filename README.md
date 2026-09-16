@@ -78,4 +78,4 @@ adb -s DEVICE shell am instrument -w -e scenario automaticService com.jimmyshin.
 
 `history`는 이력을 조회합니다. `automaticService`는 대상 종료·서비스 재생·자동 복구를 실제 시험하고 자동화를 켭니다. 위젯을 누른 시험과 구분합니다. `automationOff`와 `automationOn`은 기기 검증용으로 자동화 설정을 바꿉니다. 시험 후 원래 설정을 복원해야 합니다. `pausePlayback`은 자동화를 끄고 대상 음악을 일시정지합니다. `pauseTarget`은 자동화 설정을 유지하며 대상 음악만 일시정지합니다. `probe`, `sequence`, `cancel`, `cancelInitialization`, `menuSequence`는 기존 수동 복구·중단 검증에 사용합니다. `cancelExitWait`는 대상 종료 반환 직후 취소하여 후속 초기화·재생이 없음을 확인합니다.
 
-Git Flow에 따라 개발 중 앱 버전을 올리지 않고, master 병합 단계에서만 변경합니다. 이번 개발 기준은 `1.0.1 / versionCode 2`입니다.
+Git Flow에 따라 개발 중 앱 버전을 올리지 않고, 릴리스 브랜치에서 변경한 뒤 master와 develop에 반영합니다. 현재 릴리스 기준은 `1.0.3 / versionCode 4`입니다.

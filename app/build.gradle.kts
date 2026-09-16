@@ -53,8 +53,8 @@ android {
         applicationId = "com.jimmyshin.automusicrestart"
         minSdk = 33
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.0.3"
         testInstrumentationRunner = "com.jimmyshin.automusicrestart.DeviceChecks"
         buildConfigField("String", "CONTROL_BUILD_ID", "\"$controlBuildId\"")
         buildConfigField("int", "CONTROL_SERVICE_VERSION", controlServiceVersion.toString())
