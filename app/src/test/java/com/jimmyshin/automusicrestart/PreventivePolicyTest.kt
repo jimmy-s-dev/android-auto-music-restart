@@ -18,6 +18,49 @@ class PreventivePolicyTest {
         assertEquals(ActivityHistory.ABSENT, value.activity)
         assertEquals("$boot:10:20", value.key)
     }
+    @Test fun startSequenceWithLruFieldKeepsIdentity() {
+        val observed = dump().replace("startSeq=20", "startSeq=20 lruSeq=50")
+        val value = ProcessHistoryParser.parse(observed, boot, 0x10)
+        assertEquals("$boot:10:20", value.key)
+        assertEquals(ActivityHistory.ABSENT, value.activity)
+    }
+    @Test fun startSequenceWithTabAndAdditionalFieldsKeepsIdentity() {
+        val observed = dump().replace("startSeq=20", "startSeq=20\tlruSeq=50 extra=1")
+        assertEquals("$boot:10:20", ProcessHistoryParser.parse(observed, boot, 0x10).key)
+    }
+    @Test fun combinedFieldFormatPreservesVisibleUiHistory() {
+        val observed = dump().replace("startSeq=20", "startSeq=20 lruSeq=50\n    hasShownUi=true")
+        val value = ProcessHistoryParser.parse(observed, boot, 0x10)
+        assertEquals("$boot:10:20", value.key)
+        assertEquals(ActivityHistory.PRESENT, value.activity)
+    }
+    @Test fun combinedFieldFormatSupportsCrLf() {
+        val observed = dump().replace("startSeq=20", "startSeq=20 lruSeq=50").replace("\n", "\r\n")
+        assertEquals("$boot:10:20", ProcessHistoryParser.parse(observed, boot, 0x10).key)
+    }
+    @Test fun lruSequenceChangesDoNotChangeProcessKey() {
+        val first = dump().replace("startSeq=20", "startSeq=20 lruSeq=50")
+        val second = first.replace("lruSeq=50", "lruSeq=51")
+        val firstKey = ProcessHistoryParser.parse(first, boot, 0x10).key
+        assertEquals("$boot:10:20", firstKey)
+        assertEquals(firstKey, ProcessHistoryParser.parse(second, boot, 0x10).key)
+    }
+    @Test fun malformedStartSequenceTokenInvalidatesIdentity() {
+        listOf("", "unknown", "-20", "20oops", "20.5", "0x14").forEach { token ->
+            val observed = dump().replace("startSeq=20", "startSeq=$token lruSeq=50")
+            val value = ProcessHistoryParser.parse(observed, boot, 0x10)
+            assertNull("Malformed start sequence: $token", value.key)
+            assertEquals(ActivityHistory.UNKNOWN, value.activity)
+        }
+    }
+    @Test fun lruSequenceCannotReplaceMissingStartSequence() {
+        val observed = dump().replace("startSeq=20", "lruSeq=20")
+        assertNull(ProcessHistoryParser.parse(observed, boot, 0x10).key)
+    }
+    @Test fun mismatchedPidWithCombinedStartSequenceInvalidatesIdentity() {
+        val observed = dump().replace("pid=10", "pid=11").replace("startSeq=20", "startSeq=20 lruSeq=50")
+        assertNull(ProcessHistoryParser.parse(observed, boot, 0x10).key)
+    }
     @Test fun historicalActivitySurvivesNoCurrentActivity() {
         assertEquals(ActivityHistory.PRESENT, ProcessHistoryParser.parse(dump("0x3b0"), boot, 0x10).activity)
     }
