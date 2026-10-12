@@ -29,7 +29,8 @@ object ProcessHistoryParser {
         val main = records.singleOrNull { it.second == Target.PACKAGE }
             ?: return ProcessHistory.unknown("대상 주 프로세스 식별 불가")
         val pid = Regex("(?m)^    pid=(\\d+)\\s*$").find(main.third)?.groupValues?.get(1)
-        val seq = Regex("(?m)^    startSeq=(\\d+)\\s*$").find(main.third)?.groupValues?.get(1)
+        // Some platform dumps put lruSeq on the same line; require a complete numeric token.
+        val seq = Regex("(?m)^    startSeq=(\\d+)(?=[\\t ]|$)").find(main.third)?.groupValues?.get(1)
         if (pid != main.first || seq == null) return ProcessHistory.unknown("PID·시작 식별값 검증 실패")
         val key = "$boot:$pid:$seq"
         if (records.size != 1) return ProcessHistory(key, ActivityHistory.UNKNOWN, "복수 대상 프로세스")
